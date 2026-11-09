@@ -92,6 +92,9 @@ python train.py --split 0 --name split0                 # -> weights/split0.pth 
 python eval.py weights/split0_best.pth --split 0        # scores/ per species
 python predict.py my_recordings/ --model_path weights/split0_best.pth   # FS and fmin from each file, or --specie / --FS / --fmin
 ```
+`predict.py` writes `{basename}_f0.csv` with `time`, `f0`, `confidence` (voicing), `salience_max` (peak of the model's pitch distribution)
+and `salience`, the spectral salience of the estimated F0 as in bioacoustic_f0_estimation (energy within +-1 semitone over energy within
++-6 semitones, on magnitudes whitened per frequency bin over the file), computed on the CQT so that it does not depend on F0 or sampling rate.
 `--omit specie`, `--only specie` and `--split k` (5-fold, test fold k) work as in `paper_experiments/train_crepe.py`.
 With `--split`, `train.py` validates on the held-out fold each epoch and also saves `weights/{name}_best.pth`.
 Training and evaluation only need the cache: when the audio is absent, the file lists stored in the cache are used (same folds).

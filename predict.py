@@ -1,10 +1,11 @@
 """Estimates F0 for new recordings with a trained model, following predict.py of bioacoustic_f0_estimation.
-Saves {basename}_f0.csv with time, f0 and confidence columns, and optionally a spectrogram with overlaid predictions.
+Saves {basename}_f0.csv with time, f0, confidence, salience_max (peak of the model's pitch distribution) and salience (spectral salience
+of the estimated F0, see contour_salience) columns, and optionally a spectrogram with overlaid predictions.
 Sampling rate and fmin (bottom of the 6-octave pitch grid) come from --specie, --FS / --fmin, or by default from each file: native
 sampling rate and the highest fmin it allows (the grid then covers the 6 octaves below Nyquist). The resulting range is printed.
 """
 import math, argparse, os, warnings
-import pandas as pd, librosa, soundfile, torch, tqdm
+import numpy as np, pandas as pd, librosa, soundfile, torch, tqdm
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
@@ -54,6 +55,20 @@ def settings(filepath):
         print(f'FS={FS}Hz, fmin={fmin}Hz: the model\'s F0 estimations range from {fmin:.1f}Hz to {bin2hz(p["n_bins"], fmin, p["bins_per_octave"]):.1f}Hz' + note)
     return FS, fmin
 
+def contour_salience(x, bins, start, bpo):
+    """ Spectral salience of the estimated F0 in each frame, as in bioacoustic_f0_estimation (predict.py, voc_characterisation.py):
+    energy within +-1 semitone of the F0 over energy within +-6 semitones, on magnitudes whitened per frequency bin with the file's
+    median and standard deviation over frames (clipped to be positive). Computed on the model's CQT instead of a fixed-size FFT:
+    the +-1 / +-6 semitone bands always span the same number of bins, so values do not depend on the F0 or the sampling rate.
+    x: CQT in dB (frames, cached bins), bins: estimated F0 (grid bins), start: index of grid bin 0 in x. Values in ]0, 1]. """
+    mag = 10 ** (x.astype(np.float32) / 20)
+    z = np.clip((mag - np.median(mag, 0)) / (mag.std(0) + 1e-12), 1e-12, 1e3)
+    k1, k6 = bpo // 12, bpo // 2
+    zp = np.pad(z, ((0, 0), (k6, k6)))  # bands reaching outside the cached bins count as empty
+    win = zp[np.arange(len(z))[:, None], np.round(bins).astype(int)[:, None] + start + np.arange(2 * k6 + 1)]  # +-6 semitones around the F0
+    return win[:, k6 - k1:k6 + k1 + 1].sum(1) / win.sum(1)
+
+
 if os.path.isdir(args.input):
     files = [os.path.join(args.input, fn) for fn in sorted(os.listdir(args.input)) if fn.split('.')[-1].upper() in soundfile._formats]
 elif os.path.isfile(args.input) and args.input.split('.')[-1].upper() in soundfile._formats:
@@ -72,7 +87,8 @@ for filepath in tqdm.tqdm(files):
     salience, confidence = infer(model, x, p, device)
     bins = weighted_argmax(salience, bps)
     f0 = bin2hz(bins, fmin, p['bins_per_octave'])
-    pd.DataFrame({'time': time, 'f0': f0, 'confidence': confidence, 'salience_max': salience.max(1)}).to_csv(filepath.rsplit('.', 1)[0] + '_f0.csv', index=False)
+    pd.DataFrame({'time': time, 'f0': f0, 'confidence': confidence, 'salience_max': salience.max(1),
+                  'salience': contour_salience(x, bins, p['max_shift'], p['bins_per_octave'])}).to_csv(filepath.rsplit('.', 1)[0] + '_f0.csv', index=False)
 
     if not args.no_print and len(sig) / FS <= 60:
         mask = confidence > args.threshold
