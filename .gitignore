@@ -1,0 +1,22 @@
+data/
+cache/
+weights/
+runs/
+scores/
+__pycache__/
+logs/
+plots/
+slurm-*.out
+# empty read-only placeholders created by the Claude Code sandbox
+.claude/
+.bash_profile
+.bashrc
+.gitconfig
+.gitmodules
+.idea
+.mcp.json
+.profile
+.ripgreprc
+.vscode
+.zprofile
+.zshrc

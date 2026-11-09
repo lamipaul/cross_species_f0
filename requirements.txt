@@ -1,0 +1,11 @@
+torch>=2.0
+numpy
+scipy
+pandas
+librosa
+soundfile
+mir_eval>=0.8
+scikit_learn
+matplotlib
+tqdm
+tensorboard>=2.16
