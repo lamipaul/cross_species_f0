@@ -126,13 +126,14 @@ def compute_cqt(sig, FS, fmin, p, device='cpu', num_chunks=None, desc=None):
         num_chunks = max(1, math.ceil(4 * max(cqt.groups) * n_frames / (free_memory(device) / 4)))
     chunk = -(-n_frames // num_chunks)  # frames per chunk
     sig = np.pad(np.asarray(sig, dtype=np.float32), (pad, pad + chunk * hop))  # zeros outside the signal, as the one-pass padding
-    mags = []
+    out = []
     with torch.no_grad():
         for j in tqdm(range(0, n_frames, chunk), desc=desc, leave=False, disable=desc is None):
             seg = torch.as_tensor(sig[j * hop:(j + chunk) * hop + 2 * pad + 1], device=device).unsqueeze(0)
-            mags.append(cqt(seg)[0][:, pad // hop:pad // hop + min(chunk, n_frames - j)])  # frames whose kernels lie inside the segment
-    x = 20 * torch.log10(torch.cat(mags, 1).clamp(min=1e-8)).T
-    if x.shape[1] < n_total:
-        x = torch.cat([x, x.amin(1, keepdim=True).expand(len(x), n_total - x.shape[1])], 1)
-    x = x.cpu().numpy().astype(np.float16)
+            mag = cqt(seg)[0][:, pad // hop:pad // hop + min(chunk, n_frames - j)]  # frames whose kernels lie inside the segment
+            x = 20 * torch.log10(mag.clamp(min=1e-8)).T
+            if x.shape[1] < n_total:
+                x = torch.cat([x, x.amin(1, keepdim=True).expand(len(x), n_total - x.shape[1])], 1)
+            out.append(x.cpu().numpy().astype(np.float16))  # each chunk leaves the device: only one chunk is ever held there
+    x = np.concatenate(out)
     return x, np.arange(len(x)) * hop / FS

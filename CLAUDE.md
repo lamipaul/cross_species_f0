@@ -121,6 +121,8 @@ See `README.md` for the pipeline, file table and model/training details. Read it
   identical), `num_chunks` automatic from longest kernel x frames vs a quarter of the free device memory (`--num_chunks` overrides);
   `model.infer` builds the harmonic stack per encoder batch and keeps per-frame logits on the CPU. Fixes the user's CUDA OOM (6 GB laptop GPU).
   Testing one-pass CQTs of long low-fmin signals on CPU gets the sandbox shell killed (exit 137): test on short clips.
+  2026-11-12: remaining OOM was the full-file concatenation + dB conversion on the GPU (cqt.py, after the chunk loop); each chunk now goes to
+  dB / float16 / CPU right away. 60-min synthetic signal (22 kHz, fmin 125): peak GPU memory 0.36 GB. The user's GPU is visible when the sandbox is off.
 - 2026-11-11: `predict.py --step` sets the model's actual CQT hop (user's request; not output resampling, which was rolled back), with a warning
   outside 2 ** +-time_aug of the own hop (read from the checkpoint args; v2: 0). v3 on 2 owl clips: acc 0.97 at the own 5 ms hop, 0.96 at 2.5 ms,
   0.94-0.98 at 10 ms, 0.91-0.93 at 1 ms (outside the range). `predict.py` also has per-file progress bars (`desc` in compute_cqt / infer).
