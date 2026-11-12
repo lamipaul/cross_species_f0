@@ -5,12 +5,12 @@ Sampling rate and fmin (bottom of the 6-octave pitch grid) come from --specie, -
 sampling rate and the highest fmin it allows (the grid then covers the 6 octaves below Nyquist). The resulting range is printed.
 """
 import math, argparse, os, warnings
-import numpy as np, pandas as pd, librosa, soundfile, torch, tqdm
+import numpy as np, pandas as pd, librosa, soundfile, torch
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from metadata import species, fake_species
-from cqt import compute_cqt, bin2hz, max_fmin
+from cqt import compute_cqt, bin2hz, max_fmin, hop_length
 from model import load_model, infer
 from decode import weighted_argmax
 warnings.filterwarnings('ignore')
@@ -21,6 +21,8 @@ parser.add_argument('--model_path', type=str, required=True, help="Path of model
 parser.add_argument('--specie', type=str, default=None, help="Species from metadata.py, to get the sampling rate and fmin")
 parser.add_argument('--FS', type=int, default=None, help="Sampling rate (overrides --specie; default: native rate of each file)")
 parser.add_argument('--fmin', type=float, default=None, help="Bottom of the 6-octave pitch grid in Hz (overrides --specie; default: highest value allowed by the sampling rate)")
+parser.add_argument('--step', type=float, default=None, help="Time step between predictions in seconds, i.e. the CQT hop given to the model (default: the model's own hop, 0.9 / fmin). The hop is part of the input representation: models trained with time rescaling (train.py --time_aug) have seen hops within 2 ** +-time_aug of their own; outside that range a warning is printed")
+parser.add_argument('--num_chunks', type=int, default=None, help="Number of chunks the CQT of each file is computed in, to bound memory (default: from the file length, FS, fmin and the free memory, see cqt.compute_cqt); results do not change")
 parser.add_argument('--use_channel', type=int, help='ID of the channel to use (starting from 0, if not specified, will use a mix of all)', default=None)
 parser.add_argument('--no_print', action='store_true', help="Skip printing spectrograms with overlaid F0 predictions")
 parser.add_argument('--threshold', type=float, default=0.5, help="Confidence threshold used when printing F0 predictions on spectrograms")
@@ -32,7 +34,8 @@ assert not args.specie or meta, f'{args.specie} is not a species of metadata.py'
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 model, p = load_model(args.model_path, device)
 bps = p['bins_per_octave'] // 12
-reported = set()
+time_aug = torch.load(args.model_path, map_location='cpu', weights_only=False).get('args', {}).get('time_aug') or 0.  # hop range seen in training (octaves)
+reported, step_reported = set(), set()
 
 
 def settings(filepath):
@@ -70,21 +73,29 @@ def contour_salience(x, bins, start, bpo):
 
 
 if os.path.isdir(args.input):
-    files = [os.path.join(args.input, fn) for fn in sorted(os.listdir(args.input)) if fn.split('.')[-1].upper() in soundfile._formats]
-elif os.path.isfile(args.input) and args.input.split('.')[-1].upper() in soundfile._formats:
+    files = [os.path.join(args.input, fn) for fn in sorted(os.listdir(args.input)) if fn.split('.')[-1].upper() in list(soundfile._formats) + ['AIF']]
+elif os.path.isfile(args.input) and args.input.split('.')[-1].upper() in list(soundfile._formats) + ['AIF']:
     files = [args.input]
 else:
     files = []
 if len(files) == 0:
     raise Exception(f"The given input argument {args.input} is either not a valid directory/file path, or it doesn't contain any sound file of the supported formats")
 
-for filepath in tqdm.tqdm(files):
+for ifile, filepath in enumerate(files):
+    desc = f'{ifile + 1}/{len(files)}: {os.path.basename(filepath)}'  # progress bars per file, as in bioacoustic_f0_estimation
     FS, fmin = settings(filepath)
     sig, fs = librosa.load(filepath, sr=FS, mono=args.use_channel is None)
     if sig.ndim > 1:
         sig = sig[args.use_channel]
-    x, time = compute_cqt(sig, FS, fmin, p, device)
-    salience, confidence = infer(model, x, p, device)
+    pf = {**p, 'hop_periods': args.step * fmin} if args.step else p  # CQT parameters for this file: same bins, requested hop
+    if args.step and (FS, fmin) not in step_reported:
+        step_reported.add((FS, fmin))
+        native, used = hop_length(FS, fmin, p) / FS, hop_length(FS, fmin, pf) / FS
+        print(f'Step {used * 1000:.2f}ms (model\'s own hop at fmin={fmin}Hz: {native * 1000:.2f}ms, ratio {used / native:.2f})'
+              + (f'. WARNING: outside the hops seen in training ({native * 2 ** -time_aug * 1000:.2f}-{native * 2 ** time_aug * 1000:.2f}ms), predictions may degrade'
+                 if abs(np.log2(used / native)) > time_aug + 1e-3 else ''))
+    x, time = compute_cqt(sig, FS, fmin, pf, device, args.num_chunks, desc=desc + ' (CQT)')
+    salience, confidence = infer(model, x, p, device, desc=desc)
     bins = weighted_argmax(salience, bps)
     f0 = bin2hz(bins, fmin, p['bins_per_octave'])
     pd.DataFrame({'time': time, 'f0': f0, 'confidence': confidence, 'salience_max': salience.max(1),

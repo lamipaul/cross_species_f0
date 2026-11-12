@@ -1,6 +1,7 @@
 from functools import partial
 import numpy as np
 import torch, torch.nn as nn, torch.nn.functional as F
+from tqdm import tqdm
 
 
 def add_model_args(parser):
@@ -171,20 +172,23 @@ def load_model(path, device='cpu'):
 
 
 @torch.no_grad()
-def infer(model, x, p, device='cpu', hop=None, batch_size=64, enc_batch_size=2048):
+def infer(model, x, p, device='cpu', hop=None, batch_size=64, enc_batch_size=2048, desc=None):
     """ Runs the model over a whole clip.
     x: cached CQT in dB (frames, n_bins + 2 * max_shift). The encoder runs once per frame; the temporal head then sees
     the whole clip in one pass if it is not longer than model.context frames, otherwise overlapping windows of model.context
     frames (hop: default context // 4) whose predictions are averaged with a Hann weighting (frames near a window's centre,
     which have context on both sides, count more).
+    desc: if given, shows progress bars over the batches with this description.
     Returns the salience (frames, n_bins) and voicing probabilities (frames,) as numpy arrays.
     """
     ctx, ms, nb = model.context, p['max_shift'], p['n_bins']
-    xh = harmonic_stack(torch.as_tensor(np.asarray(x, dtype=np.float32)), ms, nb, model.harmonics, p['bins_per_octave'])
-    T = len(xh)
-    local = torch.cat([model.encoder(xh[i:i + enc_batch_size].to(device)) for i in range(0, T, enc_batch_size)])
+    T = len(x)
+    # harmonic stack and encoder per batch of frames, local logits kept on the CPU: memory does not grow with the file length on the GPU
+    local = torch.cat([model.encoder(harmonic_stack(torch.as_tensor(np.asarray(x[i:i + enc_batch_size], dtype=np.float32), device=device),
+                                                    ms, nb, model.harmonics, p['bins_per_octave'])).cpu()
+                       for i in tqdm(range(0, T, enc_batch_size), desc=desc and desc + ' (encoder)', leave=False, disable=desc is None)])
     if T <= ctx:
-        logits, voicing = model.temporal(local.unsqueeze(0))
+        logits, voicing = model.temporal(local.unsqueeze(0).to(device))
         return F.softmax(logits[0], dim=-1).cpu().numpy(), torch.sigmoid(voicing[0]).cpu().numpy()
     hop = hop or max(1, ctx // 4)
     starts = list(range(0, T - ctx + 1, hop))
@@ -192,9 +196,9 @@ def infer(model, x, p, device='cpu', hop=None, batch_size=64, enc_batch_size=204
         starts.append(T - ctx)
     w = torch.hann_window(ctx + 2, periodic=False)[1:-1]  # strictly positive weights
     sal, voi, cnt = torch.zeros(T, nb), torch.zeros(T), torch.zeros(T)
-    for b in range(0, len(starts), batch_size):
+    for b in tqdm(range(0, len(starts), batch_size), desc=desc and desc + ' (temporal head)', leave=False, disable=desc is None):
         idx = torch.tensor(starts[b:b + batch_size]).unsqueeze(1) + torch.arange(ctx)
-        logits, voicing = model.temporal(local[idx.to(device)])
+        logits, voicing = model.temporal(local[idx].to(device))
         sal.index_add_(0, idx.flatten(), (F.softmax(logits, dim=-1).cpu() * w[None, :, None]).flatten(0, 1))
         voi.index_add_(0, idx.flatten(), (torch.sigmoid(voicing).cpu() * w).flatten())
         cnt.index_add_(0, idx.flatten(), w.repeat(len(idx)))

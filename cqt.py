@@ -10,8 +10,9 @@ trick of bioacoustic_f0_estimation) gives the same input, whatever the species.
 Kernels are computed in the time domain (like nnAudio's CQT1992v2 used by PESTO), grouped per octave to avoid
 convolving high-frequency bins with the long kernels of the lowest octave.
 """
-import hashlib, json, functools
+import os, math, hashlib, json, functools
 import numpy as np
+from tqdm import tqdm
 import torch, torch.nn as nn, torch.nn.functional as F
 
 
@@ -101,15 +102,36 @@ def get_cqt(FS, fmin, p_json, device):
     return CQT(FS, hop, f0, n_valid, p['bins_per_octave'], p['filter_scale']).to(device), hop, n_total
 
 
-def compute_cqt(sig, FS, fmin, p, device='cpu'):
+def free_memory(device):
+    """ Free memory of the device in bytes (GPU: CUDA free memory; CPU: available RAM) """
+    if torch.device(device).type == 'cuda':
+        return torch.cuda.mem_get_info(device)[0]
+    return os.sysconf('SC_AVPHYS_PAGES') * os.sysconf('SC_PAGE_SIZE')
+
+
+def compute_cqt(sig, FS, fmin, p, device='cpu', num_chunks=None, desc=None):
     """ Returns the log-magnitude CQT (in dB) of shape (frames, n_bins + 2 * max_shift) as float16, and the frame times
-    (frame j is centred on sample j * hop_length(FS, fmin, p)). Bins above Nyquist get the frame minimum. """
+    (frame j is centred on sample j * hop_length(FS, fmin, p)). Bins above Nyquist get the frame minimum.
+    The frames are processed in num_chunks chunks to bound memory (as PESTO's num_chunks): the convolution of long low-frequency
+    kernels over a whole long file can need several GB. Its memory grows with (longest kernel, ~ FS / fmin) x (frames per chunk,
+    ~ duration x fmin), so by default num_chunks keeps 4 bytes x longest kernel x frames per chunk under a quarter of the device's
+    free memory. Each chunk gets its signal plus half the longest kernel on each side, so the result does not depend on num_chunks.
+    desc: if given, shows a progress bar over the chunks with this description. """
     if fmin > max_fmin(FS, p):
         raise ValueError(f'fmin={fmin}Hz is too high for FS={FS}Hz: the grid would go over Nyquist (max fmin is {max_fmin(FS, p):.1f}Hz)')
     cqt, hop, n_total = get_cqt(FS, fmin, json.dumps(p, sort_keys=True), device)
+    n_frames = (len(sig) - 1) // hop + 1
+    pad = -(-(max(cqt.groups) // 2) // hop) * hop  # half the longest kernel, rounded up to whole hops so that chunk frames stay aligned
+    if num_chunks is None:
+        num_chunks = max(1, math.ceil(4 * max(cqt.groups) * n_frames / (free_memory(device) / 4)))
+    chunk = -(-n_frames // num_chunks)  # frames per chunk
+    sig = np.pad(np.asarray(sig, dtype=np.float32), (pad, pad + chunk * hop))  # zeros outside the signal, as the one-pass padding
+    mags = []
     with torch.no_grad():
-        mag = cqt(torch.as_tensor(sig, dtype=torch.float32, device=device).unsqueeze(0))[0]
-    x = 20 * torch.log10(mag.clamp(min=1e-8)).T
+        for j in tqdm(range(0, n_frames, chunk), desc=desc, leave=False, disable=desc is None):
+            seg = torch.as_tensor(sig[j * hop:(j + chunk) * hop + 2 * pad + 1], device=device).unsqueeze(0)
+            mags.append(cqt(seg)[0][:, pad // hop:pad // hop + min(chunk, n_frames - j)])  # frames whose kernels lie inside the segment
+    x = 20 * torch.log10(torch.cat(mags, 1).clamp(min=1e-8)).T
     if x.shape[1] < n_total:
         x = torch.cat([x, x.amin(1, keepdim=True).expand(len(x), n_total - x.shape[1])], 1)
     x = x.cpu().numpy().astype(np.float16)

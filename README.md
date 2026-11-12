@@ -91,6 +91,7 @@ python preprocess.py                                    # cache CQTs, frame labe
 python train.py --split 0 --name split0                 # -> weights/split0.pth and weights/split0_best.pth
 python eval.py weights/split0_best.pth --split 0        # scores/ per species
 python predict.py my_recordings/ --model_path weights/split0_best.pth   # FS and fmin from each file, or --specie / --FS / --fmin
+python predict.py my_recordings/ --model_path weights/split0_best.pth --step 0.002   # another time step (CQT hop given to the model)
 ```
 `predict.py` writes `{basename}_f0.csv` with `time`, `f0`, `confidence` (voicing), `salience_max` (peak of the model's pitch distribution)
 and `salience`, the spectral salience of the estimated F0 as in bioacoustic_f0_estimation (energy within +-1 semitone over energy within

@@ -116,6 +116,14 @@ See `README.md` for the pipeline, file table and model/training details. Read it
 - 2026-11-09 (user's decision): `eval.py` grid+timing-compensated accuracy now uses 10 cents (`--comp_cent_thr`, column
   `Pitch acc (grid+timing-comp., 10 cents)`); `Pitch acc` and grid-comp. stay at 50 cents. Earlier grid+timing numbers (e.g. 0.868) were at 50 cents.
   Little owls v3: 0.979 at 50 cents -> 0.885 at 10 cents.
+- 2026-11-09: `predict.py` writes a spectral `salience` column (`contour_salience`: +-1 / +-6 semitone energy ratio on the whitened CQT, as
+  bioacoustic_f0_estimation but resolution-independent). Memory on long files: `cqt.compute_cqt` works in chunks with exact overlap (results
+  identical), `num_chunks` automatic from longest kernel x frames vs a quarter of the free device memory (`--num_chunks` overrides);
+  `model.infer` builds the harmonic stack per encoder batch and keeps per-frame logits on the CPU. Fixes the user's CUDA OOM (6 GB laptop GPU).
+  Testing one-pass CQTs of long low-fmin signals on CPU gets the sandbox shell killed (exit 137): test on short clips.
+- 2026-11-11: `predict.py --step` sets the model's actual CQT hop (user's request; not output resampling, which was rolled back), with a warning
+  outside 2 ** +-time_aug of the own hop (read from the checkpoint args; v2: 0). v3 on 2 owl clips: acc 0.97 at the own 5 ms hop, 0.96 at 2.5 ms,
+  0.94-0.98 at 10 ms, 0.91-0.93 at 1 ms (outside the range). `predict.py` also has per-file progress bars (`desc` in compute_cqt / infer).
 - Open items (2026-11-09):
   - Planned: orangutan jump quantification then drop (above); two-pass automatic fmin in `predict.py`; CQT-domain reverberation
     augmentation (gibbons follow reverberation tails instead of sweeps; WPE did not help).
